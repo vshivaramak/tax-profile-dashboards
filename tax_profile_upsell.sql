@@ -156,36 +156,40 @@ user_level_funnel AS (
             ELSE 0
         END AS confirm_flag,
 
-        -- Base Product Price
+        -- Base Product Price (Apr 16+ end-of-season pricing)
         CASE COALESCE(base.product_family_name, 'Unknown')
-            WHEN 'TTO Deluxe' THEN 21
-            WHEN 'TTO Premier' THEN 35
-            WHEN 'TTO SE' THEN 50
+            WHEN 'TTO Deluxe' THEN 30
+            WHEN 'TTO Premier' THEN 50
+            WHEN 'TTO SE' THEN 70
             ELSE 0
         END AS base_product_price,
 
         -- Adjusted confirm (weighted by incremental revenue value)
-        -- Standalone/Compchart DIWM = weight 1.0, Lite = weight 0.5
-        CASE
-            WHEN base.treatment_name IN ('DIWM_COMPCHART', 'DIWM_STANDALONE')
-                 AND view_flag = 1 AND confirm_flag = 1 THEN 1.0
-            WHEN base.treatment_name IN ('DIWM_LITE_STANDALONE', 'DIWM_LITE_COMPCHART')
-                 AND view_flag = 1 AND confirm_flag = 1 THEN 0.5
-            ELSE 0
-        END AS adjusted_confirm_flag,
-
-        -- PM Incremental Revenue per confirm
+        -- DIWM full: Deluxe/Premier=1.0, SE=1.1 | Lite: 0.6
         CASE
             WHEN base.treatment_name IN ('DIWM_COMPCHART', 'DIWM_STANDALONE')
                  AND view_flag = 1 AND confirm_flag = 1 THEN
                 CASE COALESCE(base.product_family_name, 'Unknown')
-                    WHEN 'TTO Deluxe' THEN 54
-                    WHEN 'TTO Premier' THEN 50
-                    WHEN 'TTO SE' THEN 50
-                    ELSE 50
+                    WHEN 'TTO SE' THEN 1.1
+                    ELSE 1.0
                 END
             WHEN base.treatment_name IN ('DIWM_LITE_STANDALONE', 'DIWM_LITE_COMPCHART')
-                 AND view_flag = 1 AND confirm_flag = 1 THEN 30
+                 AND view_flag = 1 AND confirm_flag = 1 THEN 0.6
+            ELSE 0
+        END AS adjusted_confirm_flag,
+
+        -- PM Incremental Revenue per confirm (Apr 16+ pricing)
+        CASE
+            WHEN base.treatment_name IN ('DIWM_COMPCHART', 'DIWM_STANDALONE')
+                 AND view_flag = 1 AND confirm_flag = 1 THEN
+                CASE COALESCE(base.product_family_name, 'Unknown')
+                    WHEN 'TTO Deluxe' THEN 70
+                    WHEN 'TTO Premier' THEN 70
+                    WHEN 'TTO SE' THEN 80
+                    ELSE 70
+                END
+            WHEN base.treatment_name IN ('DIWM_LITE_STANDALONE', 'DIWM_LITE_COMPCHART')
+                 AND view_flag = 1 AND confirm_flag = 1 THEN 40
             ELSE 0
         END AS pm_inc_rev,
 
