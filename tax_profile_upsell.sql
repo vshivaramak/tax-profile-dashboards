@@ -65,10 +65,14 @@ view_activity AS (
 confirm_activity AS (
     SELECT
         dcua.auth_id,
-        -- DIWM Compchart confirms (upgrade_to_expert_assist OR upgrade_to_expert_assist_premium)
+        -- DIWM Compchart: DIWM only (no PP)
         MAX(CASE WHEN fcce.page_parameter_name = 's_taxprofile_upsell_diwm_comp_chart'
-                  AND fcce.ui_object_detail_name IN ('upgrade_to_expert_assist', 'upgrade_to_expert_assist_premium')
-             THEN 1 ELSE 0 END) AS confirm_flag_compchart,
+                  AND fcce.ui_object_detail_name = 'upgrade_to_expert_assist'
+             THEN 1 ELSE 0 END) AS confirm_flag_compchart_diwm,
+        -- DIWM Compchart: DIWM + PP
+        MAX(CASE WHEN fcce.page_parameter_name = 's_taxprofile_upsell_diwm_comp_chart'
+                  AND fcce.ui_object_detail_name = 'upgrade_to_expert_assist_premium'
+             THEN 1 ELSE 0 END) AS confirm_flag_compchart_pp,
         -- DIWM Standalone confirm (start_upgrade)
         MAX(CASE WHEN fcce.page_parameter_name = 's_taxprofile_upsell_diwm_standalone'
                   AND fcce.ui_object_detail_name = 'start_upgrade'
@@ -77,10 +81,14 @@ confirm_activity AS (
         MAX(CASE WHEN fcce.page_parameter_name = 's_taxprofile_upsell_diwm_lite_standalone'
                   AND fcce.ui_object_detail_name = 'start_upgrade'
              THEN 1 ELSE 0 END) AS confirm_flag_lite_standalone,
-        -- DIWM Lite Compchart confirms (upgrade_to_expert_one_time_assist OR upgrade_to_expert_assist)
+        -- DIWM Lite Compchart: Lite only
         MAX(CASE WHEN fcce.page_parameter_name = 's_taxprofile_upsell_diwm_lite_comp_chart'
-                  AND fcce.ui_object_detail_name IN ('upgrade_to_expert_one_time_assist', 'upgrade_to_expert_assist')
-             THEN 1 ELSE 0 END) AS confirm_flag_lite_compchart
+                  AND fcce.ui_object_detail_name = 'upgrade_to_expert_one_time_assist'
+             THEN 1 ELSE 0 END) AS confirm_flag_lite_cc_lite,
+        -- DIWM Lite Compchart: Full DIWM (upsold from Lite CC)
+        MAX(CASE WHEN fcce.page_parameter_name = 's_taxprofile_upsell_diwm_lite_comp_chart'
+                  AND fcce.ui_object_detail_name = 'upgrade_to_expert_assist'
+             THEN 1 ELSE 0 END) AS confirm_flag_lite_cc_diwm
     FROM tax_stg_ca.stg_catax_clickstream stg
     INNER JOIN tax_dm_ca.fact_catax_clickstream_event fcce
         ON stg.event_header_event_id = fcce.clickstream_event_id
@@ -147,14 +155,23 @@ user_level_funnel AS (
             ELSE 0
         END AS view_flag,
 
-        -- Confirm flag (match treatment to its confirm flag, gated on view)
+        -- Confirm flag (any confirm type for the user's treatment, gated on view)
         CASE
-            WHEN base.treatment_name = 'DIWM_COMPCHART' AND v.view_flag_compchart = 1 AND c.confirm_flag_compchart = 1 THEN 1
-            WHEN base.treatment_name = 'DIWM_STANDALONE' AND v.view_flag_standalone = 1 AND c.confirm_flag_standalone = 1 THEN 1
-            WHEN base.treatment_name = 'DIWM_LITE_STANDALONE' AND v.view_flag_lite_standalone = 1 AND c.confirm_flag_lite_standalone = 1 THEN 1
-            WHEN base.treatment_name = 'DIWM_LITE_COMPCHART' AND v.view_flag_lite_compchart = 1 AND c.confirm_flag_lite_compchart = 1 THEN 1
+            WHEN base.treatment_name = 'DIWM_COMPCHART' AND v.view_flag_compchart = 1
+                 AND (c.confirm_flag_compchart_diwm = 1 OR c.confirm_flag_compchart_pp = 1) THEN 1
+            WHEN base.treatment_name = 'DIWM_STANDALONE' AND v.view_flag_standalone = 1
+                 AND c.confirm_flag_standalone = 1 THEN 1
+            WHEN base.treatment_name = 'DIWM_LITE_STANDALONE' AND v.view_flag_lite_standalone = 1
+                 AND c.confirm_flag_lite_standalone = 1 THEN 1
+            WHEN base.treatment_name = 'DIWM_LITE_COMPCHART' AND v.view_flag_lite_compchart = 1
+                 AND (c.confirm_flag_lite_cc_lite = 1 OR c.confirm_flag_lite_cc_diwm = 1) THEN 1
             ELSE 0
         END AS confirm_flag,
+
+        -- Confirm sub-type flags for weight/rev branching
+        COALESCE(c.confirm_flag_compchart_pp, 0) AS is_pp_confirm,
+        COALESCE(c.confirm_flag_lite_cc_lite, 0) AS is_lite_cc_lite_confirm,
+        COALESCE(c.confirm_flag_lite_cc_diwm, 0) AS is_lite_cc_diwm_confirm,
 
         -- Base Product Price (Apr 16+ end-of-season pricing)
         CASE COALESCE(base.product_family_name, 'Unknown')
@@ -164,32 +181,84 @@ user_level_funnel AS (
             ELSE 0
         END AS base_product_price,
 
-        -- Adjusted confirm (weighted by incremental revenue value)
-        -- DIWM full: Deluxe/Premier=1.0, SE=1.1 | Lite: 0.6
+        -- Adjusted confirm weight (varies by confirm type)
+        -- DIWM full: Deluxe/Premier=1.0, SE=1.1
+        -- DIWM+PP: Deluxe/Premier=1.9, SE=2.0
+        -- Lite: 0.6
         CASE
-            WHEN base.treatment_name IN ('DIWM_COMPCHART', 'DIWM_STANDALONE')
-                 AND view_flag = 1 AND confirm_flag = 1 THEN
+            -- Compchart: PP confirm (DIWM + Priority Pro)
+            WHEN base.treatment_name = 'DIWM_COMPCHART' AND v.view_flag_compchart = 1
+                 AND c.confirm_flag_compchart_pp = 1 THEN
+                CASE COALESCE(base.product_family_name, 'Unknown')
+                    WHEN 'TTO SE' THEN 2.0
+                    ELSE 1.9
+                END
+            -- Compchart: DIWM only (no PP)
+            WHEN base.treatment_name = 'DIWM_COMPCHART' AND v.view_flag_compchart = 1
+                 AND c.confirm_flag_compchart_diwm = 1 THEN
                 CASE COALESCE(base.product_family_name, 'Unknown')
                     WHEN 'TTO SE' THEN 1.1
                     ELSE 1.0
                 END
-            WHEN base.treatment_name IN ('DIWM_LITE_STANDALONE', 'DIWM_LITE_COMPCHART')
-                 AND view_flag = 1 AND confirm_flag = 1 THEN 0.6
+            -- Standalone: always full DIWM
+            WHEN base.treatment_name = 'DIWM_STANDALONE' AND v.view_flag_standalone = 1
+                 AND c.confirm_flag_standalone = 1 THEN
+                CASE COALESCE(base.product_family_name, 'Unknown')
+                    WHEN 'TTO SE' THEN 1.1
+                    ELSE 1.0
+                END
+            -- Lite Compchart: full DIWM upsold
+            WHEN base.treatment_name = 'DIWM_LITE_COMPCHART' AND v.view_flag_lite_compchart = 1
+                 AND c.confirm_flag_lite_cc_diwm = 1 THEN
+                CASE COALESCE(base.product_family_name, 'Unknown')
+                    WHEN 'TTO SE' THEN 1.1
+                    ELSE 1.0
+                END
+            -- Lite Compchart: Lite only
+            WHEN base.treatment_name = 'DIWM_LITE_COMPCHART' AND v.view_flag_lite_compchart = 1
+                 AND c.confirm_flag_lite_cc_lite = 1 THEN 0.6
+            -- Lite Standalone: always Lite
+            WHEN base.treatment_name = 'DIWM_LITE_STANDALONE' AND v.view_flag_lite_standalone = 1
+                 AND c.confirm_flag_lite_standalone = 1 THEN 0.6
             ELSE 0
         END AS adjusted_confirm_flag,
 
-        -- PM Incremental Revenue per confirm (Apr 16+ pricing)
+        -- PM Incremental Revenue per confirm (varies by confirm type, Apr 16+ pricing)
         CASE
-            WHEN base.treatment_name IN ('DIWM_COMPCHART', 'DIWM_STANDALONE')
-                 AND view_flag = 1 AND confirm_flag = 1 THEN
+            -- Compchart: PP confirm (DIWM + Priority Pro)
+            WHEN base.treatment_name = 'DIWM_COMPCHART' AND v.view_flag_compchart = 1
+                 AND c.confirm_flag_compchart_pp = 1 THEN
                 CASE COALESCE(base.product_family_name, 'Unknown')
-                    WHEN 'TTO Deluxe' THEN 70
-                    WHEN 'TTO Premier' THEN 70
+                    WHEN 'TTO SE' THEN 140
+                    ELSE 130
+                END
+            -- Compchart: DIWM only (no PP)
+            WHEN base.treatment_name = 'DIWM_COMPCHART' AND v.view_flag_compchart = 1
+                 AND c.confirm_flag_compchart_diwm = 1 THEN
+                CASE COALESCE(base.product_family_name, 'Unknown')
                     WHEN 'TTO SE' THEN 80
                     ELSE 70
                 END
-            WHEN base.treatment_name IN ('DIWM_LITE_STANDALONE', 'DIWM_LITE_COMPCHART')
-                 AND view_flag = 1 AND confirm_flag = 1 THEN 40
+            -- Standalone: always full DIWM
+            WHEN base.treatment_name = 'DIWM_STANDALONE' AND v.view_flag_standalone = 1
+                 AND c.confirm_flag_standalone = 1 THEN
+                CASE COALESCE(base.product_family_name, 'Unknown')
+                    WHEN 'TTO SE' THEN 80
+                    ELSE 70
+                END
+            -- Lite Compchart: full DIWM upsold
+            WHEN base.treatment_name = 'DIWM_LITE_COMPCHART' AND v.view_flag_lite_compchart = 1
+                 AND c.confirm_flag_lite_cc_diwm = 1 THEN
+                CASE COALESCE(base.product_family_name, 'Unknown')
+                    WHEN 'TTO SE' THEN 80
+                    ELSE 70
+                END
+            -- Lite Compchart: Lite only
+            WHEN base.treatment_name = 'DIWM_LITE_COMPCHART' AND v.view_flag_lite_compchart = 1
+                 AND c.confirm_flag_lite_cc_lite = 1 THEN 40
+            -- Lite Standalone: always Lite
+            WHEN base.treatment_name = 'DIWM_LITE_STANDALONE' AND v.view_flag_lite_standalone = 1
+                 AND c.confirm_flag_lite_standalone = 1 THEN 40
             ELSE 0
         END AS pm_inc_rev,
 
