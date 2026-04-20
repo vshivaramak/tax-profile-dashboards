@@ -5,7 +5,7 @@
 -- Treatment A: 719069 (DIWM_STANDALONE)
 -- Treatment B: 719070 (DIWM_LITE_STANDALONE)
 -- Treatment C: 719071 (DIWM_LITE_COMPCHART)
--- Segment: Returning users, age 26+, TTO Deluxe/Premier/SE
+-- Segment: New + Returning users, all ages (25U + 26O), TTO Free/Deluxe/Premier/SE
 -- Assignment: IXP-based (ixp_dwh.ixp_first_assignment)
 -- =============================================================================
 
@@ -19,7 +19,9 @@ WITH experiment_base AS (
             WHEN ixp.treatment_id = 719071 THEN 'DIWM_LITE_COMPCHART'
         END AS treatment_name,
         CASE WHEN pam.first_completed_datetime IS NOT NULL THEN 1 ELSE 0 END AS raw_complete_flag,
-        pam.start_product_family_name AS product_family_name
+        pam.start_product_family_name AS product_family_name,
+        CASE WHEN pam.age_nbr <= 25 THEN '25U' ELSE '26O' END AS age_segment,
+        pam.account_tenure_l1_name AS tenure
     FROM ixp_dwh.ixp_first_assignment ixp
     INNER JOIN tax_rpt_ca.rpt_account_product_master pam
         ON pam.auth_id = ixp.id
@@ -28,9 +30,8 @@ WITH experiment_base AS (
       AND CAST(ixp.first_timestamp AS DATE) >= '2026-04-15'
       AND CAST(ixp.first_timestamp AS DATE) <= CURRENT_DATE() - 1
       AND ixp.treatment_id IN (719072, 719069, 719070, 719071)
-      AND pam.age_nbr > 25
-      AND pam.account_tenure_l1_name = 'Returning'
-      AND pam.start_product_family_name IN ('TTO Deluxe', 'TTO Premier', 'TTO SE')
+      AND pam.account_tenure_l1_name IN ('New', 'Returning')
+      AND pam.start_product_family_name IN ('TTO Free', 'TTO Deluxe', 'TTO Premier', 'TTO SE')
 ),
 
 view_activity AS (
@@ -145,6 +146,8 @@ user_level_funnel AS (
         base.auth_id,
         base.treatment_name,
         base.product_family_name,
+        base.age_segment,
+        base.tenure,
 
         -- View flag (match treatment to its view flag)
         CASE
@@ -290,9 +293,9 @@ user_level_funnel AS (
     LEFT JOIN contact_activity ca ON CAST(base.auth_id AS VARCHAR(50)) = CAST(ca.auth_id AS VARCHAR(50))
 )
 
--- FINAL AGGREGATION by treatment and SKU
+-- FINAL AGGREGATION by treatment, SKU, age_segment, tenure
 SELECT
-    treatment_name, product_family_name,
+    treatment_name, product_family_name, age_segment, tenure,
     COUNT(auth_id) AS total_users,
 
     SUM(view_flag) AS viewed,
@@ -327,5 +330,5 @@ SELECT
     ROUND(SUM(funnel_revenue) / NULLIF(SUM(confirm_flag), 0), 4) AS avg_rev_per_confirm
 
 FROM user_level_funnel
-GROUP BY 1, 2
-ORDER BY 1, 2;
+GROUP BY 1, 2, 3, 4
+ORDER BY 4, 3, 1, 2;
